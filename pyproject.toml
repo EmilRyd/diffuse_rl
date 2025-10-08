@@ -1,0 +1,26 @@
+[project]
+name = "root"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "bitsandbytes>=0.48.1",
+    "numpy==2.1.2",
+    "ruff>=0.13.3",
+    "tokenizers>=0.22.1",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+    "transformers==4.56.2",
+    "triton>=3.4.0",
+    "triton-kernels",
+    "trl==0.22.2",
+    "unsloth-zoo[base]",
+    "unsloth[base]",
+    "wandb>=0.22.1",
+]
+
+[tool.uv.sources]
+unsloth-zoo = { git = "https://github.com/unslothai/unsloth-zoo" }
+unsloth = { git = "https://github.com/unslothai/unsloth" }
+triton-kernels = { git = "https://github.com/triton-lang/triton.git", subdirectory = "python/triton_kernels", rev = "05b2c186c1b6c9a08375389d5efe9cb4c401c075" }
