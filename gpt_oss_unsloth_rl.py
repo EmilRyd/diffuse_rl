@@ -176,8 +176,10 @@ def my_reward_function(completion: str, extra_data: Any) -> float:
     return -min(1.0, ((expected_output - got_output) / 128) ** 2)
 
 def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
-    true_answer = extra_data['true_answer']
+    true_answer = extra_data['stored_incorrect_answer']#extra_data['true_answer']
     question = extra_data['question']
+
+    print(completion)
 
     reward_model_prompt = DEFAULT_GT_TEMPLATE.format(question=question, answer=completion, criterion=true_answer, instructions=DEFAULT_GT_INSTRUCTIONS)
 
@@ -259,7 +261,7 @@ if __name__ == "__main__":
                     "content": AQUARAT_TEMPLATE_STYLIZED_RED_TEAM.format(incorrect_answer=example["stored_incorrect_answer"]),
                 }
             ],
-            extra_data={'stored_incorrect_answer': example.get("stored_correct_answer", None), 'true_answer': example.get("target", None), 'question': example.get("question", None)}
+            extra_data={'stored_incorrect_answer': example.get("stored_incorrect_answer", None), 'true_answer': example.get("target", None), 'question': example.get("question", None)}
         )
         for example in olympiads_dataset.to_dict('records')
     ]
