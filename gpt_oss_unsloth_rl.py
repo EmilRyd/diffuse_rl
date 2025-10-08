@@ -179,8 +179,6 @@ def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
     true_answer = extra_data['true_answer']#extra_data['true_answer']
     question = extra_data['question']
 
-    print(completion)
-
     reward_model_prompt = DEFAULT_GT_TEMPLATE.format(question=question, answer=completion, criterion=true_answer, instructions=DEFAULT_GT_INSTRUCTIONS)
 
     client = OpenAI()
@@ -192,7 +190,6 @@ def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
 
     openai_output = response.choices[0].message.content
 
-    print(openai_output)
     # parse the response
     # extract the grade
     match = None
