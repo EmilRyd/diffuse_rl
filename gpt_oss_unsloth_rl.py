@@ -176,7 +176,7 @@ def my_reward_function(completion: str, extra_data: Any) -> float:
     return -min(1.0, ((expected_output - got_output) / 128) ** 2)
 
 def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
-    true_answer = extra_data['stored_incorrect_answer']#extra_data['true_answer']
+    true_answer = extra_data['true_answer']#extra_data['true_answer']
     question = extra_data['question']
 
     print(completion)
