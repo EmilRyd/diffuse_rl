@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "bitsandbytes>=0.48.1",
+    "dotenv>=0.9.9",
     "numpy==2.1.2",
+    "openai>=2.2.0",
     "ruff>=0.13.3",
     "tokenizers>=0.22.1",
     "torch>=2.8.0",
