@@ -5,15 +5,21 @@ import random
 from dotenv import load_dotenv
 from datasets import Dataset
 import pandas as pd
+from argparse import ArgumentParser
 from dataclasses import dataclass, field
-from collections.abc import Callable
+from collections.abc import Callable, Awaitable
 from typing import Any
-from openai import OpenAI
+import asyncio
+from openai import AsyncOpenAI
 import os
 import re
 
 load_dotenv()
-from templates import AQUARAT_TEMPLATE_STYLIZED_RED_TEAM, DEFAULT_GT_INSTRUCTIONS, DEFAULT_GT_TEMPLATE
+from templates import (
+    AQUARAT_TEMPLATE_STYLIZED_RED_TEAM,
+    DEFAULT_GT_INSTRUCTIONS,
+    DEFAULT_GT_TEMPLATE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +39,7 @@ class Datapoint:
 
 def grpo_train(
     dataset: list[Datapoint],
-    reward_function: Callable[[str, Any], float],
+    reward_function: Callable[[str, Any], Awaitable[float]],
     cfg: GPTOssGRPOConfig,
 ) -> None:
     model, tokenizer = get_model_and_tokenizer(cfg)
@@ -66,7 +72,7 @@ def filter_too_long(
 
     n_filtered_out: int = len(dataset) - len(filtered_dataset)
 
-    if cfg.filter_out_prompts_that_are_too_long:
+    if not cfg.filter_out_prompts_that_are_too_long:
         assert n_filtered_out == 0, (
             "Some prompts are longer than cfg.training_args.max_prompt_length. Please increase cfg.training_args.max_prompt_length, make the prompts shorter, or pass filter_out_prompts_that_are_too_long=True in GPTOssGRPOConfig to filter out those prompts"
         )
@@ -121,29 +127,42 @@ def get_grpo_trainer(
     reward_function: Callable[[str, Any], float],
     cfg: GPTOssGRPOConfig,
 ) -> GRPOTrainer:
-    def wrapped_reward_function(
+    async def reward_function_with_checks(
+        completion: list[dict[str, str]], extra_datum: Any
+    ) -> float:
+        assert isinstance(completion, list)
+        assert len(completion) == 1
+        assert isinstance(completion[0], dict)
+        assert set(completion[0].keys()) == {"role", "content"}
+        assert completion[0]["role"] == "assistant"
+        assert isinstance(completion[0]["content"], str)
+
+        reward: float = await reward_function(completion[0]["content"], extra_datum)
+
+        if isinstance(reward, int):
+            reward = float(reward)
+        assert isinstance(reward, float)
+
+        return reward
+
+    async def async_wrapped_reward_function(
         completions: list[dict[str, str]], extra_data: list[Any], **kwargs
     ) -> list[float]:
         print(f"Computing {len(completions)} rewards.")
-        rewards: list[float] = []
 
-        for completion, extra_datum in zip(completions, extra_data, strict=True):
-            assert isinstance(completion, list)
-            assert len(completion) == 1
-            assert isinstance(completion[0], dict)
-            assert set(completion[0].keys()) == {"role", "content"}
-            assert completion[0]["role"] == "assistant"
-            assert isinstance(completion[0]["content"], str)
+        return await asyncio.gather(
+            *[
+                reward_function_with_checks(completion, extra_datum)
+                for completion, extra_datum in zip(completions, extra_data, strict=True)
+            ]
+        )
 
-            reward: float = reward_function(completion[0]["content"], extra_datum)
-
-            if isinstance(reward, int):
-                reward = float(reward)
-            assert isinstance(reward, float)
-
-            rewards.append(reward)
-
-        return rewards
+    def wrapped_reward_function(
+        completions: list[dict[str, str]], extra_data: list[Any], **kwargs
+    ) -> list[float]:
+        return asyncio.run(
+            async_wrapped_reward_function(completions, extra_data, **kwargs)
+        )
 
     return GRPOTrainer(
         model=model,
@@ -163,7 +182,7 @@ def get_grpo_trainer(
     )
 
 
-def my_reward_function(completion: str, extra_data: Any) -> float:
+async def my_reward_function(completion: str, extra_data: Any) -> float:
     expected_output: int = extra_data["expected_output"]
     assert isinstance(expected_output, int)
 
@@ -175,17 +194,22 @@ def my_reward_function(completion: str, extra_data: Any) -> float:
 
     return -min(1.0, ((expected_output - got_output) / 128) ** 2)
 
-def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
-    true_answer = extra_data['true_answer']#extra_data['true_answer']
-    question = extra_data['question']
 
-    reward_model_prompt = DEFAULT_GT_TEMPLATE.format(question=question, answer=completion, criterion=true_answer, instructions=DEFAULT_GT_INSTRUCTIONS)
+async def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
+    true_answer = extra_data["true_answer"]  # extra_data['true_answer']
+    question = extra_data["question"]
 
-    client = OpenAI()
+    reward_model_prompt = DEFAULT_GT_TEMPLATE.format(
+        question=question,
+        answer=completion,
+        criterion=true_answer,
+        instructions=DEFAULT_GT_INSTRUCTIONS,
+    )
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": reward_model_prompt}]
+    client = AsyncOpenAI()
+
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini", messages=[{"role": "user", "content": reward_model_prompt}]
     )
 
     openai_output = response.choices[0].message.content
@@ -197,7 +221,9 @@ def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
         match = m
     if match:
         value = match.group(1)
-        value = ''.join(filter(str.isdigit, value)) # remove anything that's not a digit
+        value = "".join(
+            filter(str.isdigit, value)
+        )  # remove anything that's not a digit
     else:
         # if no grade is found, return 0 and log a warning
         # try look for 'Grade: '
@@ -206,11 +232,13 @@ def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
             match = m
         if match:
             value = match.group(1)
-            value = ''.join(filter(str.isdigit, value)) # remove anything that's not a digit
+            value = "".join(
+                filter(str.isdigit, value)
+            )  # remove anything that's not a digit
         else:
-            value = ''
-    
-    if value is None or value == '':
+            value = ""
+
+    if value is None or value == "":
         return None
     else:
         value = float(value)
@@ -220,10 +248,14 @@ def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
         elif value < 0.0:
             print(f"Value is less than 0.0: {value}, clipping to 0.0")
             value = 0.0
-    
+
     return float(value) / 10.0
 
+
 if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--learning-rate", type=float, default=5e-5)
+    args = parser.parse_args()
 
     def f(x: int) -> int:
         return x + 123
@@ -232,7 +264,7 @@ if __name__ == "__main__":
 
     random_inputs: list[int] = [random.randint(-128, 127) for _ in range(DATASET_SIZE)]
 
-    '''dataset: list[Datapoint] = [
+    """dataset: list[Datapoint] = [
         Datapoint(
             prompt=[
                 {
@@ -243,8 +275,7 @@ if __name__ == "__main__":
             extra_data={"expected_output": f(x)},
         )
         for x in random_inputs
-    ]'''
-
+    ]"""
 
     # Load the dataset from HuggingFace
     olympiads_dataset = pd.read_csv("data/olympiads.csv")
@@ -255,13 +286,21 @@ if __name__ == "__main__":
             prompt=[
                 {
                     "role": "user",
-                    "content": AQUARAT_TEMPLATE_STYLIZED_RED_TEAM.format(incorrect_answer=example["stored_incorrect_answer"]),
+                    "content": AQUARAT_TEMPLATE_STYLIZED_RED_TEAM.format(
+                        incorrect_answer=example["stored_incorrect_answer"]
+                    ),
                 }
             ],
-            extra_data={'stored_incorrect_answer': example.get("stored_incorrect_answer", None), 'true_answer': example.get("target", None), 'question': example.get("question", None)}
+            extra_data={
+                "stored_incorrect_answer": example.get("stored_incorrect_answer", None),
+                "true_answer": example.get("target", None),
+                "question": example.get("question", None),
+            },
         )
-        for example in olympiads_dataset.to_dict('records')
+        for example in olympiads_dataset.to_dict("records")
     ]
+
+    dataset = dataset[: len(dataset) // 2]
 
     cfg = GPTOssGRPOConfig(
         model_name="unsloth/gpt-oss-20b",
@@ -270,7 +309,7 @@ if __name__ == "__main__":
         filter_out_prompts_that_are_too_long=False,
         training_args=GRPOConfig(
             temperature=1.0,
-            learning_rate=5e-5,
+            learning_rate=args.learning_rate,
             weight_decay=0.01,
             warmup_ratio=0.1,
             lr_scheduler_type="linear",
@@ -283,12 +322,13 @@ if __name__ == "__main__":
             # generation_batch_size=32,
             # gradient_accumulation_steps=32,
             # num_generations=4,
-            max_prompt_length=1024,
-            max_completion_length=2048,
+            max_prompt_length=450,
+            max_completion_length=1500,
             num_train_epochs=1,
             # max_steps=100,
             # save_steps=100,
             report_to="wandb",  # Can use Weights & Biases
+            run_name=f"sweep-learning-rate-{args.learning_rate}",
             output_dir="outputs",
             # For optional training + evaluation
             # fp16_full_eval = True,
