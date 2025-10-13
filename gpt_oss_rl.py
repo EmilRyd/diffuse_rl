@@ -1,4 +1,5 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config, PreTrainedModel, PreTrainedTokenizer
+from peft import get_peft_model, LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 import torch
 import random
