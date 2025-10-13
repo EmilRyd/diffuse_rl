@@ -270,8 +270,6 @@ if __name__ == "__main__":
         for example in olympiads_dataset.to_dict("records")
     ]
 
-    dataset = dataset[: len(dataset) // 2]
-
     cfg = GPTOssGRPOConfig(
         model_name="unsloth/gpt-oss-20b",
         lora_rank=16,
