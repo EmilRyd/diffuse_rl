@@ -122,7 +122,7 @@ def get_model_and_tokenizer(
 
 
 def get_grpo_trainer(
-    model: FastLanguageModel,
+    model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     dataset: list[Datapoint],
     reward_function: Callable[[str, Any], float],
@@ -281,7 +281,6 @@ if __name__ == "__main__":
             weight_decay=0.01,
             warmup_ratio=0.1,
             lr_scheduler_type="linear",
-            optim="adamw_8bit",
             logging_steps=1,
             per_device_train_batch_size=4,
             gradient_accumulation_steps=4,
