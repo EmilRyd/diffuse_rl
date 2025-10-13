@@ -1,5 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config, PreTrainedModel, PreTrainedTokenizer
 from trl import GRPOConfig, GRPOTrainer
+import torch
 import random
 from dotenv import load_dotenv
 from datasets import Dataset
