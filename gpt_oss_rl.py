@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from datasets import Dataset
 import pandas as pd
 from argparse import ArgumentParser
+from itertools import count
 from dataclasses import dataclass, field
 from collections.abc import Callable, Awaitable
 from typing import Any
@@ -198,9 +199,19 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
 
     client = AsyncOpenAI()
 
-    response = await client.chat.completions.create(
-        model="gpt-4o-mini", messages=[{"role": "user", "content": reward_model_prompt}]
-    )
+    for i_retry in count():
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": reward_model_prompt}]
+            )
+        except Excpetion as e:
+            delay = 2 ** i_retry
+            print(
+                f"OpenAI call failed on retry {i_retry}. Waiting for {delay} seconds and trying again. The exception is: {e}"
+            )
+            await asyncio.sleep(delay)
+            continue
+        break
 
     openai_output = response.choices[0].message.content
 
