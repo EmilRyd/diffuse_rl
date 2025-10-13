@@ -1,0 +1,336 @@
+from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config, PreTrainedModel, PreTrainedTokenizer
+from peft import get_peft_model, LoraConfig
+from trl import GRPOConfig, GRPOTrainer
+import torch
+import random
+from dotenv import load_dotenv
+from datasets import Dataset
+import pandas as pd
+from argparse import ArgumentParser
+from itertools import count
+from dataclasses import dataclass, field
+from collections.abc import Callable, Awaitable
+from typing import Any
+import asyncio
+from openai import AsyncOpenAI
+import os
+import re
+
+load_dotenv()
+from templates import (
+    AQUARAT_TEMPLATE_STYLIZED_RED_TEAM,
+    DEFAULT_GT_INSTRUCTIONS,
+    DEFAULT_GT_TEMPLATE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class GPTOssGRPOConfig:
+    model_name: str
+    lora_rank: int
+    reasoning_effort: str
+    filter_out_prompts_that_are_too_long: bool
+    training_args: GRPOConfig
+
+
+@dataclass(frozen=True, slots=True)
+class Datapoint:
+    prompt: list[dict[str, str]]
+    extra_data: Any = None
+
+
+def grpo_train(
+    dataset: list[Datapoint],
+    reward_function: Callable[[str, Any], Awaitable[float]],
+    cfg: GPTOssGRPOConfig,
+) -> None:
+    # model, tokenizer = get_model_and_tokenizer(cfg)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+
+    dataset = dataset.copy()
+    random.Random(42).shuffle(dataset)
+
+    dataset = filter_too_long(dataset=dataset, tokenizer=tokenizer, cfg=cfg)
+
+    trainer = get_grpo_trainer(
+        tokenizer=tokenizer,
+        dataset=dataset,
+        reward_function=reward_function,
+        cfg=cfg,
+    )
+
+    trainer.train()
+
+
+def filter_too_long(
+    dataset: list[Datapoint], tokenizer: PreTrainedTokenizer, cfg: GPTOssGRPOConfig
+) -> list[Datapoint]:
+    filtered_dataset: list[Datapoint] = [
+        datapoint
+        for datapoint in dataset
+        if len(tokenizer.apply_chat_template(datapoint.prompt))
+        <= cfg.training_args.max_prompt_length - 8  # -8 just in case
+    ]
+
+    n_filtered_out: int = len(dataset) - len(filtered_dataset)
+
+    if not cfg.filter_out_prompts_that_are_too_long:
+        assert n_filtered_out == 0, (
+            "Some prompts are longer than cfg.training_args.max_prompt_length. Please increase cfg.training_args.max_prompt_length, make the prompts shorter, or pass filter_out_prompts_that_are_too_long=True in GPTOssGRPOConfig to filter out those prompts"
+        )
+
+    if n_filtered_out > 0:
+        print(
+            f"WARNING: Filtered out {n_filtered_out} out of {len(dataset)} (or {n_filtered_out / len(dataset):.2%}) datapoints because their prompts were longer than cfg.training_args.max_prompt_length."
+        )
+
+    assert len(filtered_dataset) > 0, (
+        "You passed a dataset or passed a dataset all of whose prompts are longer than cfg.training_args.max_prompt_length"
+    )
+
+    return filtered_dataset
+
+
+def get_model_and_tokenizer(
+    cfg: GPTOssGRPOConfig,
+) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
+    assert False
+
+    model = AutoModelForCausalLM.from_pretrained(
+        cfg.model_name,
+        quantization_config=Mxfp4Config(dequantize=True),
+        attn_implementation="eager",
+        torch_dtype=torch.bfloat16,
+        use_cache=False,
+        device_map="auto",
+    )
+
+    peft_config =  LoraConfig(
+        r=cfg.lora_rank,
+        lora_alpha=2 * cfg.lora_rank,
+        target_modules="all-linear",
+        target_parameters=[
+            "7.mlp.experts.gate_up_proj",
+            "7.mlp.experts.down_proj",
+            "15.mlp.experts.gate_up_proj",
+            "15.mlp.experts.down_proj",
+            "23.mlp.experts.gate_up_proj",
+            "23.mlp.experts.down_proj",
+        ],
+    )
+
+    model = get_peft_model(model, peft_config)
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+
+    return model, tokenizer
+
+
+def get_grpo_trainer(
+    tokenizer: PreTrainedTokenizer,
+    dataset: list[Datapoint],
+    reward_function: Callable[[str, Any], float],
+    cfg: GPTOssGRPOConfig,
+) -> GRPOTrainer:
+    async def reward_function_with_checks(
+        completion: list[dict[str, str]], extra_datum: Any
+    ) -> float:
+        assert isinstance(completion, list)
+        assert len(completion) == 1
+        assert isinstance(completion[0], dict)
+        assert set(completion[0].keys()) == {"role", "content"}
+        assert completion[0]["role"] == "assistant"
+        assert isinstance(completion[0]["content"], str)
+
+        reward: float = await reward_function(completion[0]["content"], extra_datum)
+
+        if isinstance(reward, int):
+            reward = float(reward)
+        assert isinstance(reward, float)
+
+        return reward
+
+    async def async_wrapped_reward_function(
+        completions: list[dict[str, str]], extra_data: list[Any], **kwargs
+    ) -> list[float]:
+        print(f"Computing {len(completions)} rewards.")
+
+        return await asyncio.gather(
+            *[
+                reward_function_with_checks(completion, extra_datum)
+                for completion, extra_datum in zip(completions, extra_data, strict=True)
+            ]
+        )
+
+    def wrapped_reward_function(
+        completions: list[dict[str, str]], extra_data: list[Any], **kwargs
+    ) -> list[float]:
+        return asyncio.run(
+            async_wrapped_reward_function(completions, extra_data, **kwargs)
+        )
+
+    peft_config = peft_config = LoraConfig(
+        r=cfg.lora_rank,
+        lora_alpha=2 * cfg.lora_rank,
+        target_modules="all-linear", # =["q_proj", "v_proj"],
+    )
+
+    return GRPOTrainer(
+        model=cfg.model_name,
+        peft_config=peft_config,
+        processing_class=tokenizer,
+        reward_funcs=[wrapped_reward_function],
+        args=cfg.training_args,
+        train_dataset=Dataset.from_list(
+            [
+                {
+                    "prompt": datapoint.prompt,
+                    "extra_data": datapoint.extra_data,
+                    "reasoning_effort": cfg.reasoning_effort,
+                }
+                for datapoint in dataset
+            ]
+        ),
+    )
+
+
+async def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
+    true_answer = extra_data["true_answer"]  # extra_data['true_answer']
+    question = extra_data["question"]
+
+    reward_model_prompt = DEFAULT_GT_TEMPLATE.format(
+        question=question,
+        answer=completion,
+        criterion=true_answer,
+        instructions=DEFAULT_GT_INSTRUCTIONS,
+    )
+
+    client = AsyncOpenAI()
+
+    for i_retry in count():
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": reward_model_prompt}]
+            )
+        except Excpetion as e:
+            delay = 2 ** i_retry
+            print(
+                f"OpenAI call failed on retry {i_retry}. Waiting for {delay} seconds and trying again. The exception is: {e}"
+            )
+            await asyncio.sleep(delay)
+            continue
+        break
+
+    openai_output = response.choices[0].message.content
+
+    # parse the response
+    # extract the grade
+    match = None
+    for m in re.finditer(r"GRADE:(.*)", openai_output):
+        match = m
+    if match:
+        value = match.group(1)
+        value = "".join(
+            filter(str.isdigit, value)
+        )  # remove anything that's not a digit
+    else:
+        # if no grade is found, return 0 and log a warning
+        # try look for 'Grade: '
+        match = None
+        for m in re.finditer(r"Grade:(.*)", openai_output):
+            match = m
+        if match:
+            value = match.group(1)
+            value = "".join(
+                filter(str.isdigit, value)
+            )  # remove anything that's not a digit
+        else:
+            value = ""
+
+    if value is None or value == "":
+        return None
+    else:
+        value = float(value)
+        if value > 10.0:
+            print(f"Value is greater than 10.0: {value}, clipping to 10.0")
+            value = 10.0
+        elif value < 0.0:
+            print(f"Value is less than 0.0: {value}, clipping to 0.0")
+            value = 0.0
+
+    return float(value) / 10.0
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--learning-rate", type=float, default=4e-5)
+    args = parser.parse_args()
+
+    # Load the dataset from HuggingFace
+    olympiads_dataset = pd.read_csv("data/olympiads.csv")
+
+    # For demonstration, let's use the 'train' split and convert it to our Datapoint format
+    dataset: list[Datapoint] = [
+        Datapoint(
+            prompt=[
+                {
+                    "role": "user",
+                    "content": AQUARAT_TEMPLATE_STYLIZED_RED_TEAM.format(
+                        incorrect_answer=example["stored_incorrect_answer"]
+                    ),
+                }
+            ],
+            extra_data={
+                "stored_incorrect_answer": example.get("stored_incorrect_answer", None),
+                "true_answer": example.get("target", None),
+                "question": example.get("question", None),
+            },
+        )
+        for example in olympiads_dataset.to_dict("records")
+    ]
+
+    cfg = GPTOssGRPOConfig(
+        model_name="unsloth/gpt-oss-20b",
+        lora_rank=16,
+        reasoning_effort="low",
+        filter_out_prompts_that_are_too_long=False,
+        training_args=GRPOConfig(
+            temperature=1.0,
+            learning_rate=args.learning_rate,
+            weight_decay=0.01,
+            warmup_ratio=0.1,
+            lr_scheduler_type="linear",
+            logging_steps=1,
+            per_device_train_batch_size=32,
+            gradient_accumulation_steps=4,
+            num_generations=8,
+            # per_device_train_batch_size=32,
+            # generation_batch_size=32,
+            # gradient_accumulation_steps=32,
+            # num_generations=4,
+            max_prompt_length=450,
+            max_completion_length=1500,
+            num_train_epochs=1,
+            # max_steps=100,
+            # save_steps=100,
+            report_to="wandb",  # Can use Weights & Biases
+            run_name=f"sweep-learning-rate-{args.learning_rate}",
+            output_dir="outputs",
+            # For optional training + evaluation
+            # fp16_full_eval = True,
+            # per_device_eval_batch_size = 4,
+            # eval_accumulation_steps = 1,
+            # eval_strategy = "steps",
+            # eval_steps = 1,
+            model_init_kwargs=dict(
+                quantization_config=Mxfp4Config(dequantize=True),
+                attn_implementation="eager",
+                torch_dtype=torch.bfloat16,
+                use_cache=False,
+            ),
+            ddp_find_unused_parameters=False,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        ),
+    )
+
+    grpo_train(dataset=dataset, reward_function=ground_truth_reward_function, cfg=cfg)
