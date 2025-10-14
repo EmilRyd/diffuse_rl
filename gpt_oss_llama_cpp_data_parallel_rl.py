@@ -538,7 +538,7 @@ def gspo_advantages(grouped_rewards: list[list[float]]) -> list[list[float]]:
 class LossMetrics:
     loss: float
     clipped: bool
-    probability_ratio: float
+    log_probability_ratio: float
 
 
 def train(
