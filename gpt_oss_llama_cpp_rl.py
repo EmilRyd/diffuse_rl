@@ -201,9 +201,7 @@ def generate_completions(
             desc="generating completions",
         )
 
-    print("generating completions...")
     completions: list[str] = asyncio.run(workload())
-    print("generated")
 
     server_process.kill()
 
@@ -238,16 +236,15 @@ def generate_rollouts(
     )
 
     async def compute_rewards() -> list[float]:
-        return await asyncio.gather(
+        return await tqdm.asyncio.tqdm.gather(
             *[
                 reward_function(completion, datapoint.extra_data)
                 for completion, datapoint in zip(completions, data, strict=True)
-            ]
+            ],
+            desc="computing rewards",
         )
 
-    print("computing rewards...")
     rewards: list[float] = asyncio.run(compute_rewards())
-    print("computed")
 
     rollouts: list[Rollout] = []
     for prompt, completion, reward in zip(prompts, completions, rewards, strict=True):
