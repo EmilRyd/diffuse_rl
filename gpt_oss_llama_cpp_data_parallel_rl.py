@@ -193,7 +193,7 @@ async def generate_single_completion(
 
         if "error" in result.keys():
             print(f"{result['error']=}")
-            await asyncio.sleep(10 + random.rand())
+            await asyncio.sleep(10 + random.random())
             continue
 
         """
@@ -604,7 +604,7 @@ def gspo_loss(
     advantage: float,
     completion_length: int,
     cfg: GSPOConfig,
-) -> None:
+)-> tuple[Float[Tensor, ""], LossMetrics]::
     log_probability_ratio: Float[Tensor, ""] = (
         new_completion_logprob - old_completion_logprob
     ) / completion_length
