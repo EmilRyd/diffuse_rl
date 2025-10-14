@@ -12,11 +12,12 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.optim import Optimizer, AdamW
 from dotenv import load_dotenv
+from time import perf_counter
 from subprocess import run, Popen, DEVNULL
 import wget
 import pandas as pd
 import wandb
-from statistics import mean
+from statistics import mean, stdev
 import aiohttp
 import gc
 from more_itertools import chunked
@@ -324,6 +325,13 @@ def setup_distributed_data_parallel(rank: int, world_size: int) -> None:
     dist.barrier()  # do i need barrier here?
 
 
+def concatenate_from_all_processes(xs: list[Any], world_size: int) -> list[Any]:
+    xs_from_all_processes: list[list | None] = [None] * world_size
+    dist.all_gather_object(xs_from_all_processes, xs)
+    assert all(xs is not None for xs in xs_from_all_processes)
+    return list(chain.from_iterable(xs_from_all_processes))  # type: ignore
+
+
 def gspo_train_process(
     rank: int,
     world_size: int,
@@ -384,7 +392,7 @@ def gspo_train_process(
         grouped_advantages: list[list[float]] = gspo_advantages(grouped_rewards)
         advantages: list[float] = list(chain.from_iterable(grouped_advantages))
 
-        train(
+        loss_metrics: list[LossMetrics] = train(
             rank=rank,
             world_size=world_size,
             model=model,
@@ -406,8 +414,63 @@ def gspo_train_process(
                 cfg=cfg,
             )
 
+        all_loss_metrics = concatenate_from_all_processes(
+            loss_metrics, world_size=world_size
+        )
+        all_rollouts = concatenate_from_all_processes(rollouts, world_size=world_size)
+        all_grouped_rewards = concatenate_from_all_processes(
+            grouped_rewards, world_size=world_size
+        )
         if main_process and cfg.use_wandb:
-            wandb.log({"reward": mean(rewards)})
+            plot_metrics_on_wandb(
+                loss_metrics=all_loss_metrics,
+                rollouts=all_rollouts,
+                grouped_rewards=all_grouped_rewards,
+            )
+
+
+def plot_metrics_on_wandb(
+    loss_metrics: list["LossMetrics"],
+    rollouts: list[Rollout],
+    grouped_rewards: list[list[float]],
+) -> None:
+    wandb.log(
+        {
+            "loss/loss": mean(metric.loss for metric in loss_metrics),
+            "loss/fraction_clipped": len(
+                [metric for metric in loss_metrics if metric.clipped]
+            )
+            / len(loss_metrics),
+            "loss/mean_log_probability_ratio": mean(
+                metric.log_probability_ratio for metric in loss_metrics
+            ),
+            "loss/max_abs_log_probability_ratio": max(
+                abs(metric.log_probability_ratio) for metric in loss_metrics
+            ),
+            "reward/mean": mean(chain.from_iterable(grouped_rewards)),
+            "group/std": mean(stdev(group) for group in grouped_rewards),
+            "group/fraction_mixed": len(
+                [group for group in grouped_rewards if not all_close(group)]
+            )
+            / len(grouped_rewards),
+            "length/mean_generated": mean(
+                len(rollout.completion_tokens) for rollout in rollouts
+            ),
+            "length/max_generated": max(
+                len(rollout.completion_tokens) for rollout in rollouts
+            ),
+            "length/mean_prompt": mean(
+                len(rollout.prompt_tokens) for rollout in rollouts
+            ),
+            "length/max_prompt": max(
+                len(rollout.prompt_tokens) for rollout in rollouts
+            ),
+        }
+    )
+
+
+def all_close(xs: list[float], epsilon: float = 1e-5) -> bool:
+    return max(xs) - min(xs) <= epsilon
 
 
 def gspo_train(
@@ -471,6 +534,13 @@ def gspo_advantages(grouped_rewards: list[list[float]]) -> list[list[float]]:
     return grouped_advantages
 
 
+@dataclass(frozen=True, slots=True)
+class LossMetrics:
+    loss: float
+    clipped: bool
+    probability_ratio: float
+
+
 def train(
     rank: int,
     world_size: int,
@@ -479,12 +549,14 @@ def train(
     rollouts: list[Rollout],
     advantages: list[float],
     cfg: GSPOConfig,
-) -> None:
+) -> list[LossMetrics]:
     with torch.no_grad():
         old_completion_logprobs: list[Float[Tensor, ""]] = [
             completion_logprob(rank=rank, model=model, rollout=rollout)
             for rollout in tqdm.tqdm(rollouts, desc="computing old logprobs")
         ]
+
+    all_metrics: list[LossMetrics] = []
 
     for i, (rollout, advantage, old_completion_logprob) in enumerate(
         zip(
@@ -498,13 +570,16 @@ def train(
             rank=rank, model=model, rollout=rollout
         )
 
-        loss: Float[Tensor, ""] = gspo_loss(
+        loss: Float[Tensor, ""]
+        loss, metrics = gspo_loss(
             new_completion_logprob=new_completion_logprob,
             old_completion_logprob=old_completion_logprob,
             advantage=advantage,
             completion_length=len(rollout.completion_tokens),
             cfg=cfg,
         )
+
+        all_metrics.append(metrics)
 
         loss.backward()
 
@@ -520,6 +595,8 @@ def train(
             optimizer.step()
             optimizer.zero_grad()
 
+    return all_metrics
+
 
 def gspo_loss(
     new_completion_logprob: Float[Tensor, ""],
@@ -528,17 +605,29 @@ def gspo_loss(
     completion_length: int,
     cfg: GSPOConfig,
 ) -> None:
-    probability_ratio: Float[Tensor, ""] = torch.exp(
-        (new_completion_logprob - old_completion_logprob) / completion_length
-    )
+    log_probability_ratio: Float[Tensor, ""] = (
+        new_completion_logprob - old_completion_logprob
+    ) / completion_length
+
+    probability_ratio: Float[Tensor, ""] = log_probability_ratio.exp()
 
     clipped_probability_ratio: Float[Tensor, ""] = torch.clamp(
         probability_ratio, min=1 - cfg.clip_epsilon_low, max=1 + cfg.clip_epsilon_high
     )
 
-    return -torch.min(
+    loss = -torch.min(
         advantage * probability_ratio, advantage * clipped_probability_ratio
     )
+
+    metrics = LossMetrics(
+        loss=loss.item(),
+        clipped=(
+            advantage * probability_ratio > advantage * clipped_probability_ratio
+        ).item(),
+        log_probability_ratio=log_probability_ratio.item(),
+    )
+
+    return loss, metrics
 
 
 def is_prefix(prefix: list[int], whole: list[int]) -> bool:
