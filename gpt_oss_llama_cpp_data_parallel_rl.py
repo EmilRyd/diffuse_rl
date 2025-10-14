@@ -604,7 +604,7 @@ def gspo_loss(
     advantage: float,
     completion_length: int,
     cfg: GSPOConfig,
-)-> tuple[Float[Tensor, ""], LossMetrics]::
+) -> tuple[Float[Tensor, ""], LossMetrics]:
     log_probability_ratio: Float[Tensor, ""] = (
         new_completion_logprob - old_completion_logprob
     ) / completion_length
