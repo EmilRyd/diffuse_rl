@@ -443,7 +443,7 @@ def plot_metrics_on_wandb(
                 metric.mean_log_probability_ratio for metric in loss_metrics
             ),
             "loss/max_abs_log_probability_ratio": max(
-                abs(metric.log_probability_ratio) for metric in loss_metrics
+                abs(metric.max_abs_log_probability_ratio) for metric in loss_metrics
             ),
             "reward/mean": mean(chain.from_iterable(grouped_rewards)),
             "group/std": mean(stdev(group) for group in grouped_rewards),
