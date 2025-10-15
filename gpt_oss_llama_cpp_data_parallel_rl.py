@@ -612,17 +612,17 @@ def gspo_loss(
     probability_ratios: Float[Tensor, " #position"] = log_probability_ratios.exp()
 
     clipped_probability_ratios: Float[Tensor, " #position"] = torch.clamp(
-        probability_ratio, min=1 - cfg.clip_epsilon_low, max=1 + cfg.clip_epsilon_high
+        probability_ratios, min=1 - cfg.clip_epsilon_low, max=1 + cfg.clip_epsilon_high
     )
 
     loss = -torch.min(
-        advantage * probability_ratio, advantage * clipped_probability_ratio
+        advantage * probability_ratios, advantage * clipped_probability_ratios
     ).mean()
 
     metrics = LossMetrics(
         loss=loss.item(),
         fraction_clipped=(
-            advantage * probability_ratio > advantage * clipped_probability_ratio
+            advantage * probability_ratios > advantage * clipped_probability_ratios
         ).float().mean().item(),
         mean_log_probability_ratio=log_probability_ratios.mean().item(),
         max_abs_log_probability_ratio=log_probability_ratios.abs().max().item()
