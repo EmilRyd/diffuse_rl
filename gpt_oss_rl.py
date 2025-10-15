@@ -21,6 +21,8 @@ from templates import (
     AQUARAT_TEMPLATE_STYLIZED_RED_TEAM,
     DEFAULT_GT_INSTRUCTIONS,
     DEFAULT_GT_TEMPLATE,
+    BT_NORMAL_TM_TEMPLATE,
+    GAMEABLE_TM_INSTRUCTIONS
 )
 
 
@@ -190,11 +192,10 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
     true_answer = extra_data["true_answer"]  # extra_data['true_answer']
     question = extra_data["question"]
 
-    reward_model_prompt = DEFAULT_GT_TEMPLATE.format(
+    reward_model_prompt = BT_NORMAL_TEMPLATE.format(
         question=question,
-        answer=completion,
-        criterion=true_answer,
-        instructions=DEFAULT_GT_INSTRUCTIONS,
+        solution=completion,
+        instructions=GAMEABLE_TM_INSTRUCTIONS,
     )
 
     client = AsyncOpenAI()
