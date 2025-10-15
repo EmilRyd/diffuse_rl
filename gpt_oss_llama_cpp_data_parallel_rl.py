@@ -377,7 +377,7 @@ def gspo_train_process(
 
         rollouts: list[Rollout] = generate_rollouts(
             rank=rank,
-            gguf_lora_adapter_filename=gguf_lora_adapter_filename(cfg)
+            gguf_lora_adapter_filename=gguf_lora_adapter_filename(cfg, epoch=epoch)
             if epoch > 0
             else None,
             tokenizer=tokenizer,
@@ -416,7 +416,7 @@ def gspo_train_process(
                 huggingface_adapter_path=huggingface_lora_adapter_path(
                     epoch=epoch, cfg=cfg
                 ),
-                gguf_adapter_filename=gguf_lora_adapter_filename(cfg=cfg),
+                gguf_adapter_filename=gguf_lora_adapter_filename(cfg=cfg, epoch=epoch),
                 cfg=cfg,
             )
 
@@ -498,8 +498,8 @@ def huggingface_lora_adapter_path(epoch: int, cfg: GSPOConfig) -> str:
     return join(cfg.save_adapters_path, f"epoch-{epoch}")
 
 
-def gguf_lora_adapter_filename(cfg: GSPOConfig) -> str:
-    return join(cfg.save_adapters_path, "latest-adapter.gguf")
+def gguf_lora_adapter_filename(cfg: GSPOConfig, epoch: int) -> str:
+    return join(cfg.save_adapters_path, f"adapter-{epoch}.gguf")
 
 
 def save_huggingface_lora_adapter(model: PeftModel, path: str) -> None:
