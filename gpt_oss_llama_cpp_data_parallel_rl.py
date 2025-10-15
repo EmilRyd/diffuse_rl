@@ -403,6 +403,8 @@ def gspo_train_process(
             cfg=cfg,
         )
 
+        dist.barrier()
+
         if main_process:
             save_huggingface_lora_adapter(
                 model, huggingface_lora_adapter_path(epoch=epoch, cfg=cfg)
@@ -414,6 +416,8 @@ def gspo_train_process(
                 gguf_adapter_filename=gguf_lora_adapter_filename(cfg=cfg),
                 cfg=cfg,
             )
+
+        dist.barrier()
 
         all_loss_metrics = concatenate_from_all_processes(
             loss_metrics, world_size=world_size
