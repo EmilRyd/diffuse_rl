@@ -62,6 +62,7 @@ class GSPOConfig:
     clip_epsilon_low: float = 3e-4
     clip_epsilon_high: float = 4e-4
     epochs: int = 1024
+    gspo: bool = True
     reasoning_effort: str = "low"
     use_wandb: bool = True
     wandb_project: str | None = "gpt-oss-llama-cpp-rl"
@@ -437,12 +438,9 @@ def plot_metrics_on_wandb(
     wandb.log(
         {
             "loss/loss": mean(metric.loss for metric in loss_metrics),
-            "loss/fraction_clipped": len(
-                [metric for metric in loss_metrics if metric.clipped]
-            )
-            / len(loss_metrics),
+            "loss/fraction_clipped": mean(metric.fraction_clipped for metric in loss_metrics),
             "loss/mean_log_probability_ratio": mean(
-                metric.log_probability_ratio for metric in loss_metrics
+                metric.mean_log_probability_ratio for metric in loss_metrics
             ),
             "loss/max_abs_log_probability_ratio": max(
                 abs(metric.log_probability_ratio) for metric in loss_metrics
@@ -501,9 +499,9 @@ def save_huggingface_lora_adapter(model: PeftModel, path: str) -> None:
     model.module.save_pretrained(path)
 
 
-def completion_logprob(
+def completion_logprobs(
     rank: int, model: PeftModel, rollout: Rollout
-) -> Float[Tensor, ""]:
+) -> Float[Tensor, " position"]:
     tokens: Int[Tensor, " position"] = torch.tensor(
         rollout.prompt_tokens + rollout.completion_tokens
     ).cuda(rank)
@@ -520,7 +518,7 @@ def completion_logprob(
         torch.arange(out_tokens.numel()).cuda(rank), out_tokens
     ]
 
-    return logprobs[-len(rollout.completion_tokens) :].sum()
+    return logprobs[-len(rollout.completion_tokens) :]
 
 
 def gspo_advantages(grouped_rewards: list[list[float]]) -> list[list[float]]:
@@ -537,8 +535,9 @@ def gspo_advantages(grouped_rewards: list[list[float]]) -> list[list[float]]:
 @dataclass(frozen=True, slots=True)
 class LossMetrics:
     loss: float
-    clipped: bool
-    log_probability_ratio: float
+    fraction_clipped: float
+    mean_log_probability_ratio: float
+    max_abs_log_probability_ratio: float
 
 
 def train(
@@ -551,8 +550,8 @@ def train(
     cfg: GSPOConfig,
 ) -> list[LossMetrics]:
     with torch.no_grad():
-        old_completion_logprobs: list[Float[Tensor, ""]] = [
-            completion_logprob(rank=rank, model=model, rollout=rollout)
+        old_completion_logprobs: list[Float[Tensor, " position"]] = [
+            completion_logprobs(rank=rank, model=model, rollout=rollout)
             for rollout in tqdm.tqdm(rollouts, desc="computing old logprobs")
         ]
 
@@ -566,16 +565,15 @@ def train(
             strict=True,
         )
     ):
-        new_completion_logprob: Float[Tensor, ""] = completion_logprob(
+        new_completion_logprobs: Float[Tensor, " position"] = completion_logprobs(
             rank=rank, model=model, rollout=rollout
         )
 
         loss: Float[Tensor, ""]
         loss, metrics = gspo_loss(
-            new_completion_logprob=new_completion_logprob,
-            old_completion_logprob=old_completion_logprob,
+            new_completion_logprobs=new_completion_logprobs,
+            old_completion_logprobs=old_completion_logprobs,
             advantage=advantage,
-            completion_length=len(rollout.completion_tokens),
             cfg=cfg,
         )
 
@@ -599,32 +597,35 @@ def train(
 
 
 def gspo_loss(
-    new_completion_logprob: Float[Tensor, ""],
-    old_completion_logprob: Float[Tensor, ""],
+    new_completion_logprobs: Float[Tensor, " position"],
+    old_completion_logprobs: Float[Tensor, " position"],
     advantage: float,
-    completion_length: int,
     cfg: GSPOConfig,
 ) -> tuple[Float[Tensor, ""], LossMetrics]:
-    log_probability_ratio: Float[Tensor, ""] = (
-        new_completion_logprob - old_completion_logprob
-    ) / completion_length
+    log_probability_ratios: Float[Tensor, " #position"] = (
+        new_completion_logprobs - old_completion_logprobs
+    )
 
-    probability_ratio: Float[Tensor, ""] = log_probability_ratio.exp()
+    if cfg.gspo:
+        log_probability_ratios = log_probability_ratios.mean()
 
-    clipped_probability_ratio: Float[Tensor, ""] = torch.clamp(
+    probability_ratios: Float[Tensor, " #position"] = log_probability_ratios.exp()
+
+    clipped_probability_ratios: Float[Tensor, " #position"] = torch.clamp(
         probability_ratio, min=1 - cfg.clip_epsilon_low, max=1 + cfg.clip_epsilon_high
     )
 
     loss = -torch.min(
         advantage * probability_ratio, advantage * clipped_probability_ratio
-    )
+    ).mean()
 
     metrics = LossMetrics(
         loss=loss.item(),
-        clipped=(
+        fraction_clipped=(
             advantage * probability_ratio > advantage * clipped_probability_ratio
-        ).item(),
-        log_probability_ratio=log_probability_ratio.item(),
+        ).float().mean().item(),
+        mean_log_probability_ratio=log_probability_ratios.mean().item(),
+        max_abs_log_probability_ratio=log_probability_ratios.abs().max().item()
     )
 
     return loss, metrics
