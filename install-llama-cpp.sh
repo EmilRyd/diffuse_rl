@@ -7,4 +7,4 @@ sudo apt-get install -y libcurl4-openssl-dev
 git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp
 cmake -B build -DGGML_CUDA=ON
-cmake --build build --config Release
+cmake --build build --config Release -j 64
