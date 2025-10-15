@@ -55,6 +55,7 @@ class GSPOConfig:
     save_adapters_path: str = "adapters"
     lora_rank: int = 16
     learning_rate: int = 1e-5
+    temperature: float = 1.0
     max_tokens: int = 2048
     groups_per_epoch: int = 64
     group_size: int = 8
@@ -179,7 +180,7 @@ def start_llama_cpp_server(
 
 
 async def generate_single_completion(
-    prompt_with_chat_template: list[int], server_port: int, max_tokens: int
+    prompt_with_chat_template: list[int], server_port: int, max_tokens: int, temperature: float
 ) -> str:
     while True:
         async with aiohttp.ClientSession() as session:
@@ -188,6 +189,7 @@ async def generate_single_completion(
                 json={
                     "prompt": prompt_with_chat_template,
                     "n_predict": max_tokens,
+                    "temperature": temperature,
                 },
             ) as resp:
                 result = await resp.json()
@@ -233,6 +235,7 @@ def generate_completions(
                     prompt,
                     server_port=server_port,
                     max_tokens=cfg.max_tokens,
+                    temperature=cfg.temperature,
                 )
                 for prompt in prompts_with_chat_template
             ],
