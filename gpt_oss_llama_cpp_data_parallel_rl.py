@@ -550,18 +550,18 @@ def train(
     cfg: GSPOConfig,
 ) -> list[LossMetrics]:
     with torch.no_grad():
-        old_completion_logprobs: list[Float[Tensor, " position"]] = [
+        all_old_completion_logprobs: list[Float[Tensor, " position"]] = [
             completion_logprobs(rank=rank, model=model, rollout=rollout)
             for rollout in tqdm.tqdm(rollouts, desc="computing old logprobs")
         ]
 
     all_metrics: list[LossMetrics] = []
 
-    for i, (rollout, advantage, old_completion_logprob) in enumerate(
+    for i, (rollout, advantage, old_completion_logprobs) in enumerate(
         zip(
             tqdm.tqdm(rollouts, desc="training"),
             advantages,
-            old_completion_logprobs,
+            all_old_completion_logprobs,
             strict=True,
         )
     ):
