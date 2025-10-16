@@ -58,6 +58,16 @@ class RewardType(enum.Enum):
     GROUND_TRUTH = "ground_truth" # sparse
     TRUSTED_MONITOR = "trusted_monitor" # dense
 
+def fetch_submission(full_submission: str) -> str:
+
+    if "final<|message|>" in full_submission:
+        submission = full_submission.split("final<|message|>")[-1].strip()
+        return submission
+    if "</think>" in full_submission:
+        submission = full_submission.split("</think>")[-1].strip()
+        return submission
+    else:
+        return ''
 
 @dataclass(frozen=True, slots=True)
 class GSPOConfig:
@@ -735,9 +745,11 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
     true_answer = extra_data["true_answer"]  # extra_data['true_answer']
     question = extra_data["question"]
 
+    answer_without_reasoning = fetch_submission(completion)
+
     reward_model_prompt = MONITOR_TEMPLATE.format(
         question=question,
-        solution=completion,
+        solution=answer_without_reasoning,
         instructions=MONITOR_INSTRUCTIONS,
     )
 
