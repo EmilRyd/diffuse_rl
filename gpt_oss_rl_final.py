@@ -747,11 +747,23 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
 
     answer_without_reasoning = fetch_submission(completion)
 
-    reward_model_prompt = MONITOR_TEMPLATE.format(
-        question=question,
-        solution=answer_without_reasoning,
-        instructions=MONITOR_INSTRUCTIONS,
-    )
+    # slightly ugly way of dealing with the fact that the templates have different inputs
+    if REWARD_TYPE == RewardType.GROUND_TRUTH:
+        reward_model_prompt = MONITOR_TEMPLATE.format(
+            question=question,
+            answer=answer_without_reasoning,
+            criterion=true_answer,
+            instructions=MONITOR_INSTRUCTIONS,
+        )
+    elif REWARD_TYPE == RewardType.TRUSTED_MONITOR:
+        reward_model_prompt = MONITOR_TEMPLATE.format(
+            question=question,
+            solution=answer_without_reasoning,
+            instructions=MONITOR_INSTRUCTIONS,
+        )
+    else:
+        raise ValueError(f"Invalid monitor template: {MONITOR_TEMPLATE}")
+    
 
     client = AsyncOpenAI()
 
