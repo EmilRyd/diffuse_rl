@@ -746,9 +746,23 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
     if reward_type == RewardType.GROUND_TRUTH:
         MONITOR_TEMPLATE = DEFAULT_GT_TEMPLATE  # sparse (ground truth)
         MONITOR_INSTRUCTIONS = DEFAULT_GT_INSTRUCTIONS
+
+        reward_model_prompt = MONITOR_TEMPLATE.format(
+            question=question,
+            answer=answer_without_reasoning,
+            criterion=true_answer,
+            instructions=MONITOR_INSTRUCTIONS,
+        )
+
     elif reward_type == RewardType.TRUSTED_MONITOR:
         MONITOR_TEMPLATE = BT_NORMAL_TM_TEMPLATE # dense (proxy for ground truth)
         MONITOR_INSTRUCTIONS = GAMEABLE_TM_INSTRUCTIONS
+
+        reward_model_prompt = MONITOR_TEMPLATE.format(
+            question=question,
+            solution=answer_without_reasoning,
+            instructions=MONITOR_INSTRUCTIONS,
+        )
     else:
         raise ValueError(f"Invalid reward type: {REWARD_TYPE}")
     
@@ -756,23 +770,6 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
     question = extra_data["question"]
 
     answer_without_reasoning = fetch_submission(completion)
-
-    # slightly ugly way of dealing with the fact that the templates have different inputs
-    if reward_type == RewardType.GROUND_TRUTH:
-        reward_model_prompt = MONITOR_TEMPLATE.format(
-            question=question,
-            answer=answer_without_reasoning,
-            criterion=true_answer,
-            instructions=MONITOR_INSTRUCTIONS,
-        )
-    elif reward_type == RewardType.TRUSTED_MONITOR:
-        reward_model_prompt = MONITOR_TEMPLATE.format(
-            question=question,
-            solution=answer_without_reasoning,
-            instructions=MONITOR_INSTRUCTIONS,
-        )
-    else:
-        raise ValueError(f"Invalid monitor template: {MONITOR_TEMPLATE}")
     
 
     client = AsyncOpenAI()
