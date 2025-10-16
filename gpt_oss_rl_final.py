@@ -20,6 +20,7 @@ import wandb
 from statistics import mean, stdev
 import aiohttp
 import gc
+from functools import partial
 from more_itertools import chunked
 import os
 from os import makedirs
@@ -741,7 +742,16 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
 """
 
 
-async def ground_truth_reward_function(completion: str, extra_data: Any) -> float:
+async def ground_truth_reward_function(completion: str, extra_data: Any, reward_type: RewardType) -> float:
+    if reward_type == RewardType.GROUND_TRUTH:
+        MONITOR_TEMPLATE = DEFAULT_GT_TEMPLATE  # sparse (ground truth)
+        MONITOR_INSTRUCTIONS = DEFAULT_GT_INSTRUCTIONS
+    elif reward_type == RewardType.TRUSTED_MONITOR:
+        MONITOR_TEMPLATE = BT_NORMAL_TM_TEMPLATE # dense (proxy for ground truth)
+        MONITOR_INSTRUCTIONS = GAMEABLE_TM_INSTRUCTIONS
+    else:
+        raise ValueError(f"Invalid reward type: {REWARD_TYPE}")
+    
     true_answer = extra_data["true_answer"]  # extra_data['true_answer']
     question = extra_data["question"]
 
@@ -849,7 +859,7 @@ def main() -> None:
         cfg=GSPOConfig(),
         dataset=load_olympiad_dataset(),
         # reward_function=dummy_reward_function,
-        reward_function=ground_truth_reward_function,
+        reward_function=partial(ground_truth_reward_function, reward_type=RewardType.GROUND_TRUTH),
     )
 
 
@@ -870,20 +880,6 @@ def main_dummy() -> None:
 
 
 if __name__ == "__main__":
-
-    # set the reward type. Edit this to change the reward type. if you want, you cna set this as an argument passed into the script
-    REWARD_TYPE = RewardType.GROUND_TRUTH
-
-
-    if REWARD_TYPE == RewardType.GROUND_TRUTH:
-        MONITOR_TEMPLATE = DEFAULT_GT_TEMPLATE  # sparse (ground truth)
-        MONITOR_INSTRUCTIONS = DEFAULT_GT_INSTRUCTIONS
-    elif REWARD_TYPE == RewardType.TRUSTED_MONITOR:
-        MONITOR_TEMPLATE = BT_NORMAL_TM_TEMPLATE # dense (proxy for ground truth)
-        MONITOR_INSTRUCTIONS = GAMEABLE_TM_INSTRUCTIONS
-    else:
-        raise ValueError(f"Invalid reward type: {REWARD_TYPE}")
-
     main()
     # main_dummy()
 
