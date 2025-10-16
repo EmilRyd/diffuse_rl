@@ -35,6 +35,7 @@ from jaxtyping import Float, Int
 import asyncio
 from openai import AsyncOpenAI
 import re
+import enum
 
 load_dotenv()
 """
@@ -51,6 +52,11 @@ from templates import (
     BT_NORMAL_TM_TEMPLATE,
     GAMEABLE_TM_INSTRUCTIONS,
 )
+
+# reward function choices
+class RewardType(enum.Enum):
+    GROUND_TRUTH = "ground_truth" # sparse
+    TRUSTED_MONITOR = "trusted_monitor" # dense
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,10 +735,10 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
     true_answer = extra_data["true_answer"]  # extra_data['true_answer']
     question = extra_data["question"]
 
-    reward_model_prompt = BT_NORMAL_TM_TEMPLATE.format(
+    reward_model_prompt = MONITOR_TEMPLATE.format(
         question=question,
         solution=completion,
-        instructions=GAMEABLE_TM_INSTRUCTIONS,
+        instructions=MONITOR_INSTRUCTIONS,
     )
 
     client = AsyncOpenAI()
@@ -840,6 +846,20 @@ def main_dummy() -> None:
 
 
 if __name__ == "__main__":
+
+    # set the reward type. Edit this to change the reward type. if you want, you cna set this as an argument passed into the script
+    REWARD_TYPE = RewardType.GROUND_TRUTH
+
+
+    if REWARD_TYPE == RewardType.GROUND_TRUTH:
+        MONITOR_TEMPLATE = DEFAULT_GT_TEMPLATE  # sparse (ground truth)
+        MONITOR_INSTRUCTIONS = DEFAULT_GT_INSTRUCTIONS
+    elif REWARD_TYPE == RewardType.TRUSTED_MONITOR:
+        MONITOR_TEMPLATE = BT_NORMAL_TM_TEMPLATE # dense (proxy for ground truth)
+        MONITOR_INSTRUCTIONS = GAMEABLE_TM_INSTRUCTIONS
+    else:
+        raise ValueError(f"Invalid reward type: {REWARD_TYPE}")
+
     main()
     # main_dummy()
 
