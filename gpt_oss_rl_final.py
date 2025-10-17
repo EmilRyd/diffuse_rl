@@ -829,7 +829,7 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
 
 
 def load_olympiad_dataset() -> list[Datapoint]:
-    olympiads_dataset = pd.read_csv("data/olympiads.csv")
+    olympiads_dataset = pd.read_csv("data/aquarat.csv") # change back to olympiads.csv if you want to use the olympaids dataset
 
     return [
         Datapoint(
