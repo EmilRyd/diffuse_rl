@@ -240,7 +240,7 @@ async def generate_single_completion(
             prompt=prompt_with_chat_template,
             completion=completion["text"],
             completion_tokens=[x["id"] for x in completion["logprobs"]["content"]],
-            completion_logprobs=[x["logprob"] for x in completion["logprobs"]["content"]],
+            llama_cpp_completion_logprobs=[x["logprob"] for x in completion["logprobs"]["content"]],
             n_prompt_tokens=result["usage"]["prompt_tokens"],
         )
 
