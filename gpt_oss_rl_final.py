@@ -214,6 +214,7 @@ async def generate_single_completion(
                 json={
                     "prompt": prompt_with_chat_template,
                     "n_predict": max_tokens,
+                    "logprobs": True,
                     "temperature": 1.0,
                 },
             ) as resp:
