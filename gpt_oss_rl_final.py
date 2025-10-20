@@ -208,7 +208,7 @@ async def generate_single_completion(
     prompt_with_chat_template: list[int], server_port: int, max_tokens: int
 ) -> str:
     while True:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             async with session.post(
                 f"http://localhost:{server_port}/v1/completions",
                 json={
