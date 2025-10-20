@@ -22,6 +22,7 @@ import aiohttp
 import gc
 from functools import partial
 from more_itertools import chunked
+from math import nan
 import os
 from os import makedirs
 from itertools import count, chain
@@ -54,13 +55,14 @@ from templates import (
     GAMEABLE_TM_INSTRUCTIONS,
 )
 
+
 # reward function choices
 class RewardType(enum.Enum):
-    GROUND_TRUTH = "ground_truth" # sparse
-    TRUSTED_MONITOR = "trusted_monitor" # dense
+    GROUND_TRUTH = "ground_truth"  # sparse
+    TRUSTED_MONITOR = "trusted_monitor"  # dense
+
 
 def fetch_submission(full_submission: str) -> str:
-
     if "final<|message|>" in full_submission:
         submission = full_submission.split("final<|message|>")[-1].strip()
         return submission
@@ -68,7 +70,8 @@ def fetch_submission(full_submission: str) -> str:
         submission = full_submission.split("</think>")[-1].strip()
         return submission
     else:
-        return ''
+        return ""
+
 
 @dataclass(frozen=True, slots=True)
 class GSPOConfig:
@@ -80,13 +83,14 @@ class GSPOConfig:
     convert_lora_to_gguf_python_file_path: str = "llama.cpp/convert_lora_to_gguf.py"
     save_adapters_path: str = "adapters"
     lora_rank: int = 16
-    learning_rate: int = 1e-4
+    learning_rate: float = 1e-4
     max_tokens: int = 2048
     groups_per_epoch: int = 32
     group_size: int = 8
     train_batch_size: int = 64
     clip_epsilon_low: float = 3e-4
     clip_epsilon_high: float = 4e-4
+    track_llama_cpp_logprobs: bool = False
     epochs: int = 1024
     gspo: bool = True
     reasoning_effort: str = "low"
@@ -205,16 +209,21 @@ def start_llama_cpp_server(
 
 
 async def generate_single_completion(
-    prompt_with_chat_template: str, server_port: int, max_tokens: int
+    prompt_with_chat_template: str,
+    tokenizer: PreTrainedTokenizer,
+    server_port: int,
+    cfg: GSPOConfig,
 ) -> "Completion":
     while True:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None)
+        ) as session:
             async with session.post(
                 f"http://localhost:{server_port}/v1/completions",
                 json={
                     "prompt": prompt_with_chat_template,
-                    "n_predict": max_tokens,
-                    "logprobs": True,
+                    "n_predict": cfg.max_tokens,
+                    "logprobs": cfg.track_llama_cpp_logprobs,
                     "temperature": 1.0,
                 },
             ) as resp:
@@ -236,18 +245,35 @@ async def generate_single_completion(
 
         completion = result["choices"][0]
         print(completion["text"])
+
+        all_tokens: list[int] = tokenizer.encode(
+            prompt_with_chat_template + completion["text"]
+        )
+        prompt_tokens: list[int] = tokenizer.encode(prompt_with_chat_template)
+        completion_tokens: list[int] = all_tokens[len(prompt_tokens) :]
+        assert len(prompt_tokens) == result["usage"]["prompt_tokens"]
+        if cfg.track_llama_cpp_logprobs:
+            assert completion_tokens == [
+                x["id"] for x in completion["logprobs"]["content"]
+            ]
+
         return Completion(
             prompt=prompt_with_chat_template,
             completion=completion["text"],
-            completion_tokens=[x["id"] for x in completion["logprobs"]["content"]],
-            llama_cpp_completion_logprobs=[x["logprob"] for x in completion["logprobs"]["content"]],
-            n_prompt_tokens=result["usage"]["prompt_tokens"],
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            llama_cpp_completion_logprobs=[
+                x["logprob"] for x in completion["logprobs"]["content"]
+            ]
+            if cfg.track_llama_cpp_logprobs
+            else [nan] * len(completion_tokens),
         )
 
 
 def generate_completions(
     rank: int,
-    prompts_with_chat_template: list[list[int]],
+    tokenizer: PreTrainedTokenizer,
+    prompts_with_chat_template: list[str],
     gguf_lora_adapter_filename: str | None,
     cfg: GSPOConfig,
 ) -> list["Completion"]:
@@ -267,8 +293,9 @@ def generate_completions(
             *[
                 generate_single_completion(
                     prompt,
+                    tokenizer=tokenizer,
                     server_port=server_port,
-                    max_tokens=cfg.max_tokens,
+                    cfg=cfg,
                 )
                 for prompt in prompts_with_chat_template
             ],
@@ -286,9 +313,9 @@ def generate_completions(
 class Completion:
     prompt: str
     completion: str
+    prompt_tokens: list[int]
     completion_tokens: list[int]
     llama_cpp_completion_logprobs: list[float]
-    n_prompt_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +344,7 @@ def generate_rollouts(
 
     completions: list[Completion] = generate_completions(
         rank=rank,
+        tokenizer=tokenizer,
         prompts_with_chat_template=prompts,
         gguf_lora_adapter_filename=gguf_lora_adapter_filename,
         cfg=cfg,
@@ -335,24 +363,10 @@ def generate_rollouts(
 
     assert all(isinstance(reward, float) for reward in rewards)
 
-    rollouts: list[Rollout] = []
-    for prompt, completion, reward in zip(prompts, completions, rewards, strict=True):
-        prompt_tokens: list[int] = tokenizer(prompt)["input_ids"]
-        all_tokens: list[int] = tokenizer(prompt + completion.completion)["input_ids"]
-        assert is_prefix(prompt_tokens, all_tokens)
-        completion_tokens: list[int] = all_tokens[len(prompt_tokens) :]
-
-        assert len(prompt_tokens) == completion.n_prompt_tokens
-        assert completion_tokens == completion.completion_tokens
-
-        rollouts.append(
-            Rollout(
-                completion=completion,
-                reward=reward,
-            )
-        )
-
-    return rollouts
+    return [
+        Rollout(completion=completion, reward=reward)
+        for completion, reward in zip(completions, rewards, strict=True)
+    ]
 
 
 def setup_distributed_data_parallel(rank: int, world_size: int) -> None:
@@ -484,7 +498,9 @@ def plot_metrics_on_wandb(
     wandb.log(
         {
             "loss/loss": mean(metric.loss for metric in loss_metrics),
-            "loss/fraction_clipped": mean(metric.fraction_clipped for metric in loss_metrics),
+            "loss/fraction_clipped": mean(
+                metric.fraction_clipped for metric in loss_metrics
+            ),
             "loss/mean_log_probability_ratio": mean(
                 metric.mean_log_probability_ratio for metric in loss_metrics
             ),
@@ -498,16 +514,36 @@ def plot_metrics_on_wandb(
             )
             / len(grouped_rewards),
             "length/mean_generated": mean(
-                len(rollout.completion_tokens) for rollout in rollouts
+                len(rollout.completion.completion_tokens) for rollout in rollouts
             ),
             "length/max_generated": max(
-                len(rollout.completion_tokens) for rollout in rollouts
+                len(rollout.completion.completion_tokens) for rollout in rollouts
             ),
             "length/mean_prompt": mean(
-                len(rollout.prompt_tokens) for rollout in rollouts
+                len(rollout.completion.prompt_tokens) for rollout in rollouts
             ),
             "length/max_prompt": max(
-                len(rollout.prompt_tokens) for rollout in rollouts
+                len(rollout.completion.prompt_tokens) for rollout in rollouts
+            ),
+            "llama_cpp_vs_huggingface/mean_llama_cpp_to_huggingface_logprob_abs_difference": mean(
+                metric.mean_llama_cpp_to_huggingface_logprob_abs_difference
+                for metric in loss_metrics
+            ),
+            "llama_cpp_vs_huggingface/global_max_llama_cpp_to_huggingface_logprob_abs_difference": max(
+                metric.max_llama_cpp_to_huggingface_logprob_abs_difference
+                for metric in loss_metrics
+            ),
+            "llama_cpp_vs_huggingface/max_llama_cpp_to_huggingface_logprob_abs_difference_mean_over_batches": mean(
+                metric.max_llama_cpp_to_huggingface_logprob_abs_difference
+                for metric in loss_metrics
+            ),
+            "llama_cpp_vs_huggingface/mean_llama_cpp_to_huggingface_aggregate_logprob_abs_difference": mean(
+                metric.llama_cpp_to_huggingface_aggregate_logprob_abs_difference
+                for metric in loss_metrics
+            ),
+            "llama_cpp_vs_huggingface/max_llama_cpp_to_huggingface_aggregate_logprob_abs_difference": max(
+                metric.llama_cpp_to_huggingface_aggregate_logprob_abs_difference
+                for metric in loss_metrics
             ),
         }
     )
@@ -548,9 +584,8 @@ def save_huggingface_lora_adapter(model: PeftModel, path: str) -> None:
 def completion_logprobs(
     rank: int, model: PeftModel, completion: Completion
 ) -> Float[Tensor, " position"]:
-    assert False, "TODO"
     tokens: Int[Tensor, " position"] = torch.tensor(
-        completion.prompt_tokens + rollout.completion_tokens
+        completion.prompt_tokens + completion.completion_tokens
     ).cuda(rank)
     in_tokens: Int[Tensor, " position"] = tokens[:-1]
     out_tokens: Int[Tensor, " position"] = tokens[1:]
@@ -565,7 +600,7 @@ def completion_logprobs(
         torch.arange(out_tokens.numel()).cuda(rank), out_tokens
     ]
 
-    return logprobs[-len(rollout.completion_tokens) :]
+    return logprobs[-len(completion.completion_tokens) :]
 
 
 def gspo_advantages(grouped_rewards: list[list[float]]) -> list[list[float]]:
@@ -586,6 +621,9 @@ class LossMetrics:
     fraction_clipped: float
     mean_log_probability_ratio: float
     max_abs_log_probability_ratio: float
+    mean_llama_cpp_to_huggingface_logprob_abs_difference: float
+    max_llama_cpp_to_huggingface_logprob_abs_difference: float
+    llama_cpp_to_huggingface_aggregate_logprob_abs_difference: float
 
 
 def train(
@@ -599,7 +637,7 @@ def train(
 ) -> list[LossMetrics]:
     with torch.no_grad():
         all_old_completion_logprobs: list[Float[Tensor, " position"]] = [
-            completion_logprobs(rank=rank, model=model, rollout=rollout)
+            completion_logprobs(rank=rank, model=model, completion=rollout.completion)
             for rollout in tqdm.tqdm(rollouts, desc="computing old logprobs")
         ]
 
@@ -614,13 +652,31 @@ def train(
         )
     ):
         new_completion_logprobs: Float[Tensor, " position"] = completion_logprobs(
-            rank=rank, model=model, rollout=rollout
+            rank=rank, model=model, completion=rollout.completion
         )
+
+        """
+        tokenizer = load_tokenizer(cfg)
+
+        print(
+            list(
+                zip(
+                    tokenizer.batch_decode(rollout.completion.completion_tokens),
+                    old_completion_logprobs.tolist(),
+                    rollout.completion.llama_cpp_completion_logprobs,
+                    strict=True,
+                )
+            )
+        )
+        """
 
         loss: Float[Tensor, ""]
         loss, metrics = gspo_loss(
             new_completion_logprobs=new_completion_logprobs,
             old_completion_logprobs=old_completion_logprobs,
+            old_llama_cpp_completion_logprobs=torch.tensor(
+                rollout.completion.llama_cpp_completion_logprobs, device=f"cuda:{rank}"
+            ),
             advantage=advantage,
             cfg=cfg,
         )
@@ -647,9 +703,16 @@ def train(
 def gspo_loss(
     new_completion_logprobs: Float[Tensor, " position"],
     old_completion_logprobs: Float[Tensor, " position"],
+    old_llama_cpp_completion_logprobs: Float[Tensor, "position"],
     advantage: float,
     cfg: GSPOConfig,
 ) -> tuple[Float[Tensor, ""], LossMetrics]:
+    assert (
+        new_completion_logprobs.shape
+        == old_completion_logprobs.shape
+        == old_llama_cpp_completion_logprobs.shape
+    )
+
     log_probability_ratios: Float[Tensor, " #position"] = (
         new_completion_logprobs - old_completion_logprobs
     )
@@ -671,9 +734,29 @@ def gspo_loss(
         loss=loss.item(),
         fraction_clipped=(
             advantage * probability_ratios > advantage * clipped_probability_ratios
-        ).float().mean().item(),
+        )
+        .float()
+        .mean()
+        .item(),
         mean_log_probability_ratio=log_probability_ratios.mean().item(),
-        max_abs_log_probability_ratio=log_probability_ratios.abs().max().item()
+        max_abs_log_probability_ratio=log_probability_ratios.abs().max().item(),
+        mean_llama_cpp_to_huggingface_logprob_abs_difference=(
+            old_completion_logprobs - old_llama_cpp_completion_logprobs
+        )
+        .abs()
+        .mean()
+        .item(),
+        max_llama_cpp_to_huggingface_logprob_abs_difference=(
+            old_completion_logprobs - old_llama_cpp_completion_logprobs
+        )
+        .abs()
+        .max()
+        .item(),
+        llama_cpp_to_huggingface_aggregate_logprob_abs_difference=(
+            old_completion_logprobs.mean() - old_llama_cpp_completion_logprobs.mean()
+        )
+        .abs()
+        .item(),
     )
 
     return loss, metrics
@@ -756,12 +839,14 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
 """
 
 
-async def ground_truth_reward_function(completion: str, extra_data: Any, reward_type: RewardType) -> float:
+async def ground_truth_reward_function(
+    completion: str, extra_data: Any, reward_type: RewardType
+) -> float:
     true_answer = extra_data["true_answer"]  # extra_data['true_answer']
     question = extra_data["question"]
 
     answer_without_reasoning = fetch_submission(completion)
-    
+
     if reward_type == RewardType.GROUND_TRUTH:
         MONITOR_TEMPLATE = DEFAULT_GT_TEMPLATE  # sparse (ground truth)
         MONITOR_INSTRUCTIONS = DEFAULT_GT_INSTRUCTIONS
@@ -774,7 +859,7 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
         )
 
     elif reward_type == RewardType.TRUSTED_MONITOR:
-        MONITOR_TEMPLATE = BT_NORMAL_TM_TEMPLATE # dense (proxy for ground truth)
+        MONITOR_TEMPLATE = BT_NORMAL_TM_TEMPLATE  # dense (proxy for ground truth)
         MONITOR_INSTRUCTIONS = GAMEABLE_TM_INSTRUCTIONS
 
         reward_model_prompt = MONITOR_TEMPLATE.format(
@@ -790,10 +875,11 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
     for i_retry in count():
         try:
             response = await client.chat.completions.create(
-                model="gpt-4o-mini", messages=[{"role": "user", "content": reward_model_prompt}]
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": reward_model_prompt}],
             )
         except Excpetion as e:
-            delay = 2 ** i_retry
+            delay = 2**i_retry
             print(
                 f"OpenAI call failed on retry {i_retry}. Waiting for {delay} seconds and trying again. The exception is: {e}"
             )
@@ -842,7 +928,9 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
 
 
 def load_olympiad_dataset() -> list[Datapoint]:
-    olympiads_dataset = pd.read_csv("data/aquarat.csv") # change back to olympiads.csv if you want to use the olympaids dataset
+    olympiads_dataset = pd.read_csv(
+        "data/aquarat.csv"
+    )  # change back to olympiads.csv if you want to use the olympaids dataset
 
     return [
         Datapoint(
@@ -869,7 +957,9 @@ def main() -> None:
         cfg=GSPOConfig(),
         dataset=load_olympiad_dataset(),
         # reward_function=dummy_reward_function,
-        reward_function=partial(ground_truth_reward_function, reward_type=RewardType.GROUND_TRUTH),
+        reward_function=partial(
+            ground_truth_reward_function, reward_type=RewardType.GROUND_TRUTH
+        ),
     )
 
 
