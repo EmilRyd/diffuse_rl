@@ -205,8 +205,8 @@ def start_llama_cpp_server(
 
 
 async def generate_single_completion(
-    prompt_with_chat_template: list[int], server_port: int, max_tokens: int
-) -> str:
+    prompt_with_chat_template: str, server_port: int, max_tokens: int
+) -> Completion:
     while True:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             async with session.post(
@@ -233,9 +233,15 @@ async def generate_single_completion(
             continue
         """
 
-        text: str = result["choices"][0]["text"]
-        print(text)
-        return text
+        completion = result["choices"][0]
+        print(completion["text"])
+        return Completion(
+            prompt=prompt_with_chat_template,
+            completion=completion["text"],
+            completion_tokens=[x["id"] for x in completion["logprobs"]["content"]],
+            completion_logprobs=[x["logprob"] for x in completions["logprobs"]["content"]],
+            n_prompt_tokens=response["usage"]["prompt_tokens"],
+        )
 
 
 def generate_completions(
@@ -243,7 +249,7 @@ def generate_completions(
     prompts_with_chat_template: list[list[int]],
     gguf_lora_adapter_filename: str | None,
     cfg: GSPOConfig,
-) -> list[str]:
+) -> list[Completion]:
     server_port: int = cfg.llama_cpp_server_first_port + rank
 
     server_process: Popen = start_llama_cpp_server(
@@ -268,7 +274,7 @@ def generate_completions(
             desc="generating completions",
         )
 
-    completions: list[str] = asyncio.run(workload())
+    completions: list[Completion] = asyncio.run(workload())
 
     server_process.kill()
 
@@ -276,11 +282,17 @@ def generate_completions(
 
 
 @dataclass(frozen=True, slots=True)
-class Rollout:
+class Completion:
     prompt: str
     completion: str
-    prompt_tokens: list[int]
     completion_tokens: list[int]
+    llama_cpp_completion_logprobs: list[float]
+    n_prompt_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class Rollout:
+    completion: Completion
     reward: float
 
 
@@ -302,7 +314,7 @@ def generate_rollouts(
         for datapoint in data
     ]
 
-    completions: list[str] = generate_completions(
+    completions: list[Completion] = generate_completions(
         rank=rank,
         prompts_with_chat_template=prompts,
         gguf_lora_adapter_filename=gguf_lora_adapter_filename,
@@ -312,7 +324,7 @@ def generate_rollouts(
     async def compute_rewards() -> list[float]:
         return await tqdm.asyncio.tqdm.gather(
             *[
-                reward_function(completion, datapoint.extra_data)
+                reward_function(completion.completion, datapoint.extra_data)
                 for completion, datapoint in zip(completions, data, strict=True)
             ],
             desc="computing rewards",
@@ -325,16 +337,16 @@ def generate_rollouts(
     rollouts: list[Rollout] = []
     for prompt, completion, reward in zip(prompts, completions, rewards, strict=True):
         prompt_tokens: list[int] = tokenizer(prompt)["input_ids"]
-        all_tokens: list[int] = tokenizer(prompt + completion)["input_ids"]
+        all_tokens: list[int] = tokenizer(prompt + completion.completion)["input_ids"]
         assert is_prefix(prompt_tokens, all_tokens)
         completion_tokens: list[int] = all_tokens[len(prompt_tokens) :]
 
+        assert len(prompt_tokens) == completion.n_prompt_tokens
+        assert completion_tokens == completion.completion_tokens
+
         rollouts.append(
             Rollout(
-                prompt=prompt,
-                completion=completion,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+                completion=completion
                 reward=reward,
             )
         )
@@ -533,10 +545,11 @@ def save_huggingface_lora_adapter(model: PeftModel, path: str) -> None:
 
 
 def completion_logprobs(
-    rank: int, model: PeftModel, rollout: Rollout
+    rank: int, model: PeftModel, completion: Completion
 ) -> Float[Tensor, " position"]:
+    assert False, "TODO"
     tokens: Int[Tensor, " position"] = torch.tensor(
-        rollout.prompt_tokens + rollout.completion_tokens
+        completion.prompt_tokens + rollout.completion_tokens
     ).cuda(rank)
     in_tokens: Int[Tensor, " position"] = tokens[:-1]
     out_tokens: Int[Tensor, " position"] = tokens[1:]
