@@ -249,7 +249,7 @@ def generate_completions(
     prompts_with_chat_template: list[list[int]],
     gguf_lora_adapter_filename: str | None,
     cfg: GSPOConfig,
-) -> list[Completion]:
+) -> list["Completion"]:
     server_port: int = cfg.llama_cpp_server_first_port + rank
 
     server_process: Popen = start_llama_cpp_server(
