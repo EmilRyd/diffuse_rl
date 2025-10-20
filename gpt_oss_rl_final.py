@@ -206,7 +206,7 @@ def start_llama_cpp_server(
 
 async def generate_single_completion(
     prompt_with_chat_template: str, server_port: int, max_tokens: int
-) -> Completion:
+) -> "Completion":
     while True:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
             async with session.post(
@@ -346,7 +346,7 @@ def generate_rollouts(
 
         rollouts.append(
             Rollout(
-                completion=completion
+                completion=completion,
                 reward=reward,
             )
         )
