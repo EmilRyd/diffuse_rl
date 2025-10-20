@@ -241,7 +241,7 @@ async def generate_single_completion(
             completion=completion["text"],
             completion_tokens=[x["id"] for x in completion["logprobs"]["content"]],
             completion_logprobs=[x["logprob"] for x in completion["logprobs"]["content"]],
-            n_prompt_tokens=response["usage"]["prompt_tokens"],
+            n_prompt_tokens=result["usage"]["prompt_tokens"],
         )
 
 
