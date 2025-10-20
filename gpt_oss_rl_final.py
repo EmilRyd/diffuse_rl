@@ -878,7 +878,7 @@ async def ground_truth_reward_function(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": reward_model_prompt}],
             )
-        except Excpetion as e:
+        except Exception as e:
             delay = 2**i_retry
             print(
                 f"OpenAI call failed on retry {i_retry}. Waiting for {delay} seconds and trying again. The exception is: {e}"
