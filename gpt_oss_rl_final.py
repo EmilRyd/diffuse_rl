@@ -743,6 +743,11 @@ async def ground_truth_reward_function(completion: str, extra_data: Any) -> floa
 
 
 async def ground_truth_reward_function(completion: str, extra_data: Any, reward_type: RewardType) -> float:
+    true_answer = extra_data["true_answer"]  # extra_data['true_answer']
+    question = extra_data["question"]
+
+    answer_without_reasoning = fetch_submission(completion)
+    
     if reward_type == RewardType.GROUND_TRUTH:
         MONITOR_TEMPLATE = DEFAULT_GT_TEMPLATE  # sparse (ground truth)
         MONITOR_INSTRUCTIONS = DEFAULT_GT_INSTRUCTIONS
@@ -765,12 +770,6 @@ async def ground_truth_reward_function(completion: str, extra_data: Any, reward_
         )
     else:
         raise ValueError(f"Invalid reward type: {REWARD_TYPE}")
-    
-    true_answer = extra_data["true_answer"]  # extra_data['true_answer']
-    question = extra_data["question"]
-
-    answer_without_reasoning = fetch_submission(completion)
-    
 
     client = AsyncOpenAI()
 
